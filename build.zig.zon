@@ -1,0 +1,13 @@
+.{
+    .name = .chunk_list,
+    .version = "0.0.0",
+    .fingerprint = 0xbc24dc72287b6ee2,
+    .minimum_zig_version = "0.15.1",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        //"LICENSE",
+        //"README.md",
+    },
+}
