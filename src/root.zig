@@ -47,6 +47,10 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
                 };
             }
 
+            fn toAbsolute(self: *const InternalIndex) usize {
+                return (self.inner) + (self.chunk << chunk_shift);
+            }
+
             fn next(self: *const InternalIndex) InternalIndex {
                 if (self.inner < num_elements_per_chunk - 1) {
                     return .{
@@ -72,23 +76,65 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
             }
         };
 
-        const Iterator = struct {
-            current: InternalIndex,
+        pub const Slice = struct {
+            begin: InternalIndex,
             end: InternalIndex,
             list: *Self,
 
+            fn len(self: *const Slice) usize {
+                const begin = self.begin.toAbsolute();
+                const end = self.end.toAbsolute();
+                return end - begin;
+            }
+
+            fn at(self: *const Slice, index: usize) *T {
+                std.debug.assert(index < self.len());
+
+                const absolute_index_begin = self.begin.toAbsolute();
+                const absolute_index = absolute_index_begin + index;
+                const internal = InternalIndex.fromAbsolute(absolute_index);
+
+                return &self.list.chunks[internal.chunk][internal.inner];
+            }
+
+            fn slice(self: *const Slice, start_index: usize, end_index: usize) Slice {
+                const begin = self.begin.toAbsolute();
+                const end = self.end.toAbsolute();
+
+                const absolute_begin = begin + start_index;
+                const absolute_end = begin + end_index;
+                std.debug.assert(absolute_begin <= end);
+                std.debug.assert(absolute_end <= end);
+
+                return Slice{
+                    .begin = InternalIndex.fromAbsolute(absolute_begin),
+                    .end = InternalIndex.fromAbsolute(absolute_end),
+                    .list = self.list,
+                };
+            }
+
+            fn iterate(self: *const Slice) Iterator {
+                return Iterator{
+                    .slice = self.*,
+                };
+            }
+        };
+
+        pub const Iterator = struct {
+            slice: Slice,
+
             fn next(self: *Iterator) ?*T {
                 var ptr: ?*T = null;
-                const next_index = self.current.next();
-                if (next_index.lessThan(&self.end)) {
-                    ptr = &self.list.chunks[self.current.chunk][self.current.inner];
-                    self.current = next_index;
+                const next_index = self.slice.begin.next();
+                if (next_index.lessThan(&self.slice.end)) {
+                    ptr = &self.slice.list.chunks[self.slice.begin.chunk][self.slice.begin.inner];
+                    self.slice.begin = next_index;
                 }
                 return ptr;
             }
         };
 
-        fn init() Self {
+        pub fn init() Self {
             return .{
                 .chunks = &.{},
                 .num_elements_in_last_chunk = 0,
@@ -96,15 +142,32 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
             };
         }
 
-        fn deinit(self: *Self, allocator: Allocator) void {
-            for (self.chunks) |slice| {
-                allocator.free(slice);
+        pub fn deinit(self: *Self, allocator: Allocator) void {
+            for (self.chunks) |chunk| {
+                allocator.free(chunk);
             }
             allocator.free(self.chunks);
             self.* = init();
         }
 
-        fn iterate(self: *Self) Iterator {
+        pub fn slice(self: *Self, start_index: usize, end_index: usize) Slice {
+            if (builtin.mode == .Debug) {
+                const _len = self.len();
+                std.debug.assert(start_index < _len);
+                std.debug.assert(end_index <= _len);
+            }
+
+            const begin: InternalIndex = .fromAbsolute(start_index);
+            const end: InternalIndex = .fromAbsolute(end_index);
+
+            return .{
+                .begin = begin,
+                .end = end,
+                .list = self,
+            };
+        }
+
+        pub fn iterate(self: *Self) Iterator {
             const begin: InternalIndex = .{
                 .inner = 0,
                 .chunk = 0,
@@ -113,44 +176,29 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
                 .inner = self.num_elements_in_last_chunk,
                 .chunk = self.num_full_chunks,
             };
-            return .{
-                .current = begin,
+            return .{ .slice = Slice{
+                .begin = begin,
                 .end = end,
                 .list = self,
-            };
+            } };
         }
 
-        fn range(self: *Self, start_index: usize, end_index: usize) Iterator {
-            const _len = self.len();
-            std.debug.assert(start_index < _len);
-            std.debug.assert(end_index < _len);
-
-            const begin: InternalIndex = .fromAbsolute(start_index);
-            const end: InternalIndex = .fromAbsolute(end_index);
-
-            return .{
-                .current = begin,
-                .end = end,
-                .list = self,
-            };
-        }
-
-        fn capacity(self: *const Self) usize {
+        pub fn capacity(self: *const Self) usize {
             return self.chunks.len * num_elements_per_chunk;
         }
 
-        fn unusedCapacity(self: *const Self) usize {
+        pub fn unusedCapacity(self: *const Self) usize {
             const c = self.capacity();
             const l = self.len();
             return c - l;
         }
 
-        fn len(self: *const Self) usize {
+        pub fn len(self: *const Self) usize {
             return self.num_full_chunks * num_elements_per_chunk + self.num_elements_in_last_chunk;
         }
 
         /// allows indexing this data structure like a contiguous array
-        fn at(self: *Self, absolute_index: usize) *T {
+        pub fn at(self: *Self, absolute_index: usize) *T {
             const index = InternalIndex.fromAbsolute(absolute_index);
 
             std.debug.assert(index.chunk <= self.num_full_chunks);
@@ -159,13 +207,13 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
             return &self.chunks[index.chunk][index.inner];
         }
 
-        fn resize(self: *Self, new_size: usize, allocator: Allocator) Allocator.Error!void {
+        pub fn resize(self: *Self, new_size: usize, allocator: Allocator) Allocator.Error!void {
             try self.ensureTotalCapacity(new_size, allocator);
             self.num_elements_in_last_chunk = new_size & inner_mask;
             self.num_full_chunks = new_size >> chunk_shift;
         }
 
-        fn ensureTotalCapacity(self: *Self, requested_capacity: usize, allocator: Allocator) Allocator.Error!void {
+        pub fn ensureTotalCapacity(self: *Self, requested_capacity: usize, allocator: Allocator) Allocator.Error!void {
             const old_capacity = self.capacity();
             if (requested_capacity <= old_capacity) {
                 return;
@@ -191,17 +239,17 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
             }
         }
 
-        fn ensureUnusedCapacity(self: *Self, unused_capacity: usize, allocator: Allocator) Allocator.Error!void {
+        pub fn ensureUnusedCapacity(self: *Self, unused_capacity: usize, allocator: Allocator) Allocator.Error!void {
             const _len = self.len();
             try self.ensureTotalCapacity(_len + unused_capacity, allocator);
         }
 
-        fn addOne(self: *Self, allocator: Allocator) Allocator.Error!*T {
+        pub fn addOne(self: *Self, allocator: Allocator) Allocator.Error!*T {
             try ensureUnusedCapacity(1, allocator);
             return self.addOneAssumeCapacity();
         }
 
-        fn addOneAssumeCapacity(self: *Self) *T {
+        pub fn addOneAssumeCapacity(self: *Self) *T {
             std.debug.assert(self.num_full_chunks < self.chunks.len);
 
             const item: *T = &self.chunks[self.num_full_chunks][self.num_elements_in_last_chunk];
@@ -215,22 +263,22 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
             return item;
         }
 
-        fn append(self: *Self, item: T, allocator: Allocator) Allocator.Error!void {
+        pub fn append(self: *Self, item: T, allocator: Allocator) Allocator.Error!void {
             try self.ensureUnusedCapacity(1, allocator);
             self.appendAssumeCapacity(item);
         }
 
-        fn appendAssumeCapacity(self: *Self, item: T) void {
+        pub fn appendAssumeCapacity(self: *Self, item: T) void {
             const new_item: *T = self.addOneAssumeCapacity();
             new_item.* = item;
         }
 
-        fn appendNTimes(self: *Self, value: T, n: usize, allocator: Allocator) Allocator.Error!void {
+        pub fn appendNTimes(self: *Self, value: T, n: usize, allocator: Allocator) Allocator.Error!void {
             try self.ensureUnusedCapacity(n, allocator);
             self.appendNTimesAssumeCapacity(value, n);
         }
 
-        fn appendNTimesAssumeCapacity(self: *Self, value: T, n: usize) void {
+        pub fn appendNTimesAssumeCapacity(self: *Self, value: T, n: usize) void {
             var num_inserted: usize = 0;
             var dest_begin = self.num_elements_in_last_chunk;
 
@@ -249,14 +297,12 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
             self.num_elements_in_last_chunk = dest_begin;
         }
 
-        fn appendSlice(self: *Self, items: []const T, allocator: Allocator) Allocator.Error!void {
+        pub fn appendSlice(self: *Self, items: []const T, allocator: Allocator) Allocator.Error!void {
             try self.ensureUnusedCapacity(items.len, allocator);
             self.appendSliceAssumeCapacity(items);
         }
 
-        fn appendSliceAssumeCapacity(self: *Self, items: []const T) void {
-            // std.debug.print("[before] self.num_full_chunks: {}, self.num_elements_in_last_chunk: {}\n", .{ self.num_full_chunks, self.num_elements_in_last_chunk });
-
+        pub fn appendSliceAssumeCapacity(self: *Self, items: []const T) void {
             var src_begin: usize = 0;
             var dest_begin = self.num_elements_in_last_chunk;
 
@@ -265,7 +311,6 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
 
                 const dest: []T = self.chunks[self.num_full_chunks][dest_begin .. dest_begin + num_to_copy];
                 const src: []const T = items[src_begin .. src_begin + num_to_copy];
-                // std.debug.print("\tnum to copy : {}, items.len: {}, src.len: {}, dest.len: {}, src_begin: {}\n", .{ num_to_copy, items.len, src.len, dest.len, src_begin });
                 @memcpy(dest, src);
 
                 std.debug.assert(dest_begin + src.len <= num_elements_per_chunk);
@@ -275,16 +320,14 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
             }
 
             self.num_elements_in_last_chunk = dest_begin;
-
-            // std.debug.print("[after] self.num_full_chunks: {}, self.num_elements_in_last_chunk: {}\n", .{ self.num_full_chunks, self.num_elements_in_last_chunk });
         }
 
-        fn clearRetainingCapacity(self: *Self) void {
+        pub fn clearRetainingCapacity(self: *Self) void {
             self.num_elements_in_last_chunk = 0;
             self.num_full_chunks = 0;
         }
 
-        fn concat(self: *const Self, allocator: Allocator) Allocator.Error![]T {
+        pub fn concat(self: *const Self, allocator: Allocator) Allocator.Error![]T {
             var all: []T = try allocator.alloc(T, self.len());
             var begin: usize = 0;
 
@@ -464,6 +507,63 @@ test "resize" {
     try std.testing.expectEqual(16, a.len());
 }
 
+test "slice" {
+    const allocator = std.testing.allocator;
+
+    var a = TestList.init();
+    defer a.deinit(allocator);
+
+    for (0..12) |i| {
+        try a.append(i, allocator);
+    }
+
+    var slice = a.slice(0, 0);
+    try std.testing.expectEqual(0, slice.len());
+
+    slice = a.slice(0, 1);
+    try std.testing.expectEqual(1, slice.len());
+    try std.testing.expectEqual(0, slice.at(0).*);
+
+    slice = a.slice(0, 2);
+    try std.testing.expectEqual(2, slice.len());
+    try std.testing.expectEqual(1, slice.at(1).*);
+
+    slice = a.slice(0, 3);
+    try std.testing.expectEqual(3, slice.len());
+    try std.testing.expectEqual(2, slice.at(2).*);
+
+    slice = a.slice(0, 4);
+    try std.testing.expectEqual(4, slice.len());
+    try std.testing.expectEqual(3, slice.at(3).*);
+
+    slice = a.slice(0, 5);
+    try std.testing.expectEqual(5, slice.len());
+    try std.testing.expectEqual(4, slice.at(4).*);
+
+    slice = a.slice(0, 8);
+    try std.testing.expectEqual(8, slice.len());
+    try std.testing.expectEqual(7, slice.at(7).*);
+
+    slice = a.slice(1, 9);
+    try std.testing.expectEqual(8, slice.len());
+    try std.testing.expectEqual(1, slice.at(0).*);
+    try std.testing.expectEqual(8, slice.at(7).*);
+
+    slice = a.slice(3, 12);
+    try std.testing.expectEqual(9, slice.len());
+    try std.testing.expectEqual(3, slice.at(0).*);
+    try std.testing.expectEqual(11, slice.at(8).*);
+
+    slice = a.slice(4, 12);
+    try std.testing.expectEqual(8, slice.len());
+    try std.testing.expectEqual(4, slice.at(0).*);
+    try std.testing.expectEqual(11, slice.at(7).*);
+
+    slice = a.slice(0, 8).slice(2, 8).slice(2, 6).slice(1, 4).slice(2, 3);
+    try std.testing.expectEqual(1, slice.len());
+    try std.testing.expectEqual(7, slice.at(0).*);
+}
+
 test "iterate" {
     const allocator = std.testing.allocator;
 
@@ -482,7 +582,7 @@ test "iterate" {
     }
 }
 
-test "range" {
+test "iterate slice" {
     const allocator = std.testing.allocator;
 
     var a = TestList.init();
@@ -493,16 +593,30 @@ test "range" {
     }
 
     var counter: usize = 57;
-    var iter = a.range(57, 87);
+    var iter = a.slice(57, 87).iterate();
     while (iter.next()) |ptr| {
         try std.testing.expectEqual(counter, ptr.*);
         counter += 1;
     }
 
-    iter = a.range(57, 57);
+    counter = 12;
+    iter = a.slice(12, 16).iterate();
+    while (iter.next()) |ptr| {
+        try std.testing.expectEqual(counter, ptr.*);
+        counter += 1;
+    }
+
+    counter = 96;
+    iter = a.slice(96, 100).iterate();
+    while (iter.next()) |ptr| {
+        try std.testing.expectEqual(counter, ptr.*);
+        counter += 1;
+    }
+
+    iter = a.slice(57, 57).iterate();
     try std.testing.expectEqual(null, iter.next());
 
-    iter = a.range(57, 56);
+    iter = a.slice(57, 56).iterate();
     try std.testing.expectEqual(null, iter.next());
 }
 
