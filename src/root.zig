@@ -81,13 +81,13 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
             end: InternalIndex,
             list: *Self,
 
-            fn len(self: *const Slice) usize {
+            pub fn len(self: *const Slice) usize {
                 const begin = self.begin.toAbsolute();
                 const end = self.end.toAbsolute();
                 return end - begin;
             }
 
-            fn at(self: *const Slice, index: usize) *T {
+            pub fn at(self: *const Slice, index: usize) *T {
                 std.debug.assert(index < self.len());
 
                 const absolute_index_begin = self.begin.toAbsolute();
@@ -97,7 +97,7 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
                 return &self.list.chunks[internal.chunk][internal.inner];
             }
 
-            fn slice(self: *const Slice, start_index: usize, end_index: usize) Slice {
+            pub fn slice(self: *const Slice, start_index: usize, end_index: usize) Slice {
                 const begin = self.begin.toAbsolute();
                 const end = self.end.toAbsolute();
 
@@ -113,7 +113,7 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
                 };
             }
 
-            fn iterate(self: *const Slice) Iterator {
+            pub fn iterate(self: *const Slice) Iterator {
                 return Iterator{
                     .slice = self.*,
                 };
@@ -123,7 +123,7 @@ pub fn ChunkList(comptime T: type, comptime num_elements_per_chunk: usize) type 
         pub const Iterator = struct {
             slice: Slice,
 
-            fn next(self: *Iterator) ?*T {
+            pub fn next(self: *Iterator) ?*T {
                 var ptr: ?*T = null;
                 const next_index = self.slice.begin.next();
                 if (next_index.lessThan(&self.slice.end)) {
